@@ -10,19 +10,48 @@
 //! - `skip` detections (agent-owned viewer screens) keep the prior state.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::detect::Agent;
 use crate::detect::engine::{Detection, EngineState};
 
 const PENDING_IDLE_CONFIRMATIONS: u8 = 2;
 
+/// A debounced state together with when it last changed *as displayed*:
+/// `since` restarts only when the user-visible bucket (blocked / working /
+/// idle) changes, so engine Idle↔Unknown flips do not reset the clock.
+#[derive(Debug, Clone, Copy)]
+pub struct PublishedState {
+    pub state: EngineState,
+    pub since: Instant,
+}
+
+/// Engine Unknown renders as idle everywhere user-facing; fold it before
+/// deciding whether the displayed state actually changed.
+fn display_state(state: EngineState) -> EngineState {
+    match state {
+        EngineState::Unknown => EngineState::Idle,
+        other => other,
+    }
+}
+
 #[derive(Debug)]
 struct PaneTracker {
     agent: Agent,
     published: EngineState,
+    published_since: Instant,
     pending_idle: u8,
     startup_grace: bool,
     last_seen_cycle: u64,
+}
+
+impl PaneTracker {
+    fn published_state(&self) -> PublishedState {
+        PublishedState {
+            state: self.published,
+            since: self.published_since,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -42,7 +71,17 @@ impl StateStore {
     }
 
     /// Fold one raw detection into the pane's published state.
-    pub fn apply(&mut self, pane_id: &str, agent: Agent, detection: &Detection) -> EngineState {
+    pub fn apply(&mut self, pane_id: &str, agent: Agent, detection: &Detection) -> PublishedState {
+        self.apply_at(pane_id, agent, detection, Instant::now())
+    }
+
+    fn apply_at(
+        &mut self,
+        pane_id: &str,
+        agent: Agent,
+        detection: &Detection,
+        now: Instant,
+    ) -> PublishedState {
         let cycle = self.cycle;
         let tracker = match self.trackers.get_mut(pane_id) {
             Some(tracker) if tracker.agent == agent => tracker,
@@ -53,12 +92,16 @@ impl StateStore {
                     PaneTracker {
                         agent,
                         published: EngineState::Idle,
+                        published_since: now,
                         pending_idle: 0,
                         startup_grace: true,
                         last_seen_cycle: cycle,
                     },
                 );
-                return EngineState::Idle;
+                return PublishedState {
+                    state: EngineState::Idle,
+                    since: now,
+                };
             }
         };
         tracker.last_seen_cycle = cycle;
@@ -66,12 +109,12 @@ impl StateStore {
         if tracker.startup_grace {
             tracker.startup_grace = false;
             tracker.published = EngineState::Idle;
-            return tracker.published;
+            return tracker.published_state();
         }
 
         if detection.skip {
             tracker.pending_idle = 0;
-            return tracker.published;
+            return tracker.published_state();
         }
 
         let next = detection.state;
@@ -82,12 +125,15 @@ impl StateStore {
         if holds_working_to_idle {
             tracker.pending_idle = tracker.pending_idle.saturating_add(1);
             if tracker.pending_idle < PENDING_IDLE_CONFIRMATIONS {
-                return tracker.published;
+                return tracker.published_state();
             }
         }
         tracker.pending_idle = 0;
+        if display_state(tracker.published) != display_state(next) {
+            tracker.published_since = now;
+        }
         tracker.published = next;
-        tracker.published
+        tracker.published_state()
     }
 
     /// Drop trackers for panes not seen this cycle (pane closed). A pane id
@@ -123,9 +169,21 @@ mod tests {
 
     fn cycle(store: &mut StateStore, pane: &str, det: &Detection) -> EngineState {
         store.begin_cycle();
-        let state = store.apply(pane, Agent::Claude, det);
+        let state = store.apply(pane, Agent::Claude, det).state;
         store.prune();
         state
+    }
+
+    fn cycle_at(
+        store: &mut StateStore,
+        pane: &str,
+        det: &Detection,
+        now: Instant,
+    ) -> PublishedState {
+        store.begin_cycle();
+        let published = store.apply_at(pane, Agent::Claude, det, now);
+        store.prune();
+        published
     }
 
     #[test]
@@ -232,8 +290,117 @@ mod tests {
     fn agent_change_restarts_tracking() {
         let mut store = warmed_store("%1", EngineState::Working);
         store.begin_cycle();
-        let state = store.apply("%1", Agent::Codex, &detection(EngineState::Working, true));
+        let state = store
+            .apply("%1", Agent::Codex, &detection(EngineState::Working, true))
+            .state;
         store.prune();
         assert_eq!(state, EngineState::Idle, "new agent gets startup grace");
+    }
+
+    fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    #[test]
+    fn since_restarts_only_on_display_state_change() {
+        let mut store = StateStore::new();
+        let t0 = Instant::now();
+        // t0: new pane (grace forces Idle), clock starts.
+        assert_eq!(
+            cycle_at(&mut store, "%1", &detection(EngineState::Working, true), t0).since,
+            t0
+        );
+        // t0+2s: grace consumed, still displayed idle — clock keeps t0.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Working, true),
+            t0 + secs(2),
+        );
+        assert_eq!((p.state, p.since), (EngineState::Idle, t0));
+        // t0+4s: flips to working — clock restarts.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Working, true),
+            t0 + secs(4),
+        );
+        assert_eq!((p.state, p.since), (EngineState::Working, t0 + secs(4)));
+        // t0+6s: still working — clock unchanged.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Working, true),
+            t0 + secs(6),
+        );
+        assert_eq!(p.since, t0 + secs(4));
+    }
+
+    #[test]
+    fn idle_unknown_flips_keep_since() {
+        let mut store = StateStore::new();
+        let t0 = Instant::now();
+        cycle_at(&mut store, "%1", &detection(EngineState::Idle, true), t0);
+        cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Idle, true),
+            t0 + secs(2),
+        );
+        // Unknown displays as idle: no reset even though the engine state
+        // differs.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Unknown, false),
+            t0 + secs(4),
+        );
+        assert_eq!(p.since, t0);
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Idle, false),
+            t0 + secs(6),
+        );
+        assert_eq!(p.since, t0);
+    }
+
+    #[test]
+    fn held_and_skipped_polls_keep_since() {
+        let mut store = StateStore::new();
+        let t0 = Instant::now();
+        cycle_at(&mut store, "%1", &detection(EngineState::Working, true), t0);
+        cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Working, true),
+            t0 + secs(2),
+        );
+        let working = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Working, true),
+            t0 + secs(4),
+        );
+        assert_eq!(working.state, EngineState::Working);
+        // Skip detection keeps state and clock.
+        let p = cycle_at(&mut store, "%1", &skip_detection(), t0 + secs(6));
+        assert_eq!((p.state, p.since), (EngineState::Working, working.since));
+        // First plain idle poll is held: still working, clock untouched.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Idle, false),
+            t0 + secs(8),
+        );
+        assert_eq!((p.state, p.since), (EngineState::Working, working.since));
+        // Second confirming poll flips; clock restarts at the flip.
+        let p = cycle_at(
+            &mut store,
+            "%1",
+            &detection(EngineState::Idle, false),
+            t0 + secs(10),
+        );
+        assert_eq!((p.state, p.since), (EngineState::Idle, t0 + secs(10)));
     }
 }

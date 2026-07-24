@@ -12,6 +12,11 @@ indicator:
 
 (In the TUI these render as colored `●` glyphs.)
 
+Next to the state, the TUI shows how long the pane has been in it
+(`45s`, `12m`, `1h05m`, `2d1h`). The clock measures from the moment *this
+tool* observed the state change, so every pane starts at zero when the
+watcher launches; `--once` has no history and therefore no duration column.
+
 State changes appear within ~5 seconds (2s polling plus up to one debounce
 cycle). The tool never sends control commands to tmux — it only runs
 `list-panes` and `capture-pane` — and never touches your agents' configs.

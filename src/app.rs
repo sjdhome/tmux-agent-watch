@@ -57,7 +57,7 @@ fn ui_loop(
             }
         }
 
-        let lines = ui::tree_lines(snapshot.as_ref());
+        let lines = ui::tree_lines(snapshot.as_ref(), Instant::now());
         let header = ui::header_line(
             snapshot.as_ref(),
             updated_at.map(|at| at.elapsed().as_secs()),

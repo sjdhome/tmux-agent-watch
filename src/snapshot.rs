@@ -1,6 +1,8 @@
 //! One poll cycle: tmux discovery → process identification → screen
 //! detection → tree building.
 
+use std::time::Instant;
+
 use crate::detect::engine::{self, Detection, DetectionInput, EngineState};
 use crate::detect::{self, Agent};
 use crate::tmux::{self, PaneInfo};
@@ -11,6 +13,9 @@ pub struct AgentPane {
     pub info: PaneInfo,
     pub agent: Agent,
     pub detection: Detection,
+    /// When the debounced state last changed, from the TUI's state store.
+    /// None on raw (`--once`) scans, which have no history to measure from.
+    pub state_since: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,13 +75,17 @@ fn scan_inner(mut store: Option<&mut crate::state::StateStore>) -> Snapshot {
             continue;
         };
         let mut detection = detect_screen(agent, &raw_screen, &pane.pane_title);
+        let mut state_since = None;
         if let Some(store) = store.as_deref_mut() {
-            detection.state = store.apply(&pane.pane_id, agent, &detection);
+            let published = store.apply(&pane.pane_id, agent, &detection);
+            detection.state = published.state;
+            state_since = Some(published.since);
         }
         agent_panes.push(AgentPane {
             info: pane,
             agent,
             detection,
+            state_since,
         });
     }
 
@@ -213,6 +222,7 @@ mod tests {
             },
             agent: Agent::Claude,
             detection: engine::KNOWN_AGENT_IDLE_FALLBACK,
+            state_since: None,
         }
     }
 
