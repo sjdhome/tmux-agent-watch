@@ -5,10 +5,12 @@ running an AI coding agent (Claude Code, Codex, Gemini CLI, pi, and ~20
 others) as a session → window → pane tree with a traffic-light state
 indicator:
 
-- `●` red — **blocked**: the agent is waiting for human input (permission
-  prompt, question)
-- `●` green — **working**: the agent is actively doing something
-- `●` dim — **idle**: finished, prompt visible
+- 🔴 **blocked**: the agent is waiting for human input (permission prompt,
+  question)
+- 🟢 **working**: the agent is actively doing something
+- ⚪ **idle**: finished, prompt visible
+
+(In the TUI these render as colored `●` glyphs.)
 
 State changes appear within ~5 seconds (2s polling plus up to one debounce
 cycle). The tool never sends control commands to tmux — it only runs
