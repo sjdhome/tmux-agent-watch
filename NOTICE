@@ -1,0 +1,9 @@
+tmux-agent-watch
+
+This product includes agent-detection manifests (src/detect/manifests/*.toml,
+vendored verbatim) and detection-engine, agent-identification, and macOS
+process-discovery logic derived from herdr
+(https://github.com/ogulcancelik/herdr), licensed under the Apache License,
+Version 2.0.
+
+Vendored from herdr commit c0fb777ed7c7950c6a2f397113c1842c2e679306.
