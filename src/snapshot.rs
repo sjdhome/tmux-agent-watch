@@ -5,7 +5,10 @@ use std::time::Instant;
 
 use crate::detect::engine::{self, Detection, DetectionInput, EngineState};
 use crate::detect::{self, Agent};
+use crate::pi_ask_user;
 use crate::tmux::{self, PaneInfo};
+
+const PI_ASK_USER_RULE_ID: &str = "pi_ask_user_waiting";
 
 /// A pane with a detected agent, carrying the raw (un-debounced) detection.
 #[derive(Debug, Clone)]
@@ -96,9 +99,14 @@ fn scan_inner(mut store: Option<&mut crate::state::StateStore>) -> Snapshot {
     Snapshot::Tree(build_tree(agent_panes))
 }
 
-/// Evaluate the manifest engine for one pane's captured screen.
+/// Resolve one pane's captured screen. Project-native observations take
+/// precedence over the vendored Herdr manifest result.
 pub fn detect_screen(agent: Agent, raw_screen: &str, pane_title: &str) -> Detection {
     let screen = detection_screen(raw_screen);
+    if let Some(detection) = native_blocker(agent, &screen) {
+        return detection;
+    }
+
     let input = DetectionInput {
         screen: &screen,
         osc_title: pane_title,
@@ -111,12 +119,22 @@ pub fn detect_screen(agent: Agent, raw_screen: &str, pane_title: &str) -> Detect
     }
 }
 
-/// Trace every rule of the pane's manifest for `--explain`.
+fn native_blocker(agent: Agent, screen: &str) -> Option<Detection> {
+    (agent == Agent::Pi && pi_ask_user::is_waiting_for_user(screen)).then(|| Detection {
+        state: EngineState::Blocked,
+        rule_id: Some(PI_ASK_USER_RULE_ID.to_string()),
+        skip: false,
+        visible: true,
+    })
+}
+
+/// Trace every rule of the pane's manifest and project-native observations
+/// for `--explain`.
 pub fn explain_screen(
     agent: Agent,
     raw_screen: &str,
     pane_title: &str,
-) -> Option<(Detection, Vec<engine::RuleTrace>, String)> {
+) -> Option<(Detection, Vec<engine::RuleTrace>, String, bool)> {
     let screen = detection_screen(raw_screen);
     let input = DetectionInput {
         screen: &screen,
@@ -124,8 +142,12 @@ pub fn explain_screen(
         osc_progress: "",
     };
     let manifest = detect::manifest_id(agent).and_then(detect::manifests::get)?;
-    let (detection, traces) = engine::explain(manifest, input);
-    Some((detection, traces, screen))
+    let (mut detection, traces) = engine::explain(manifest, input);
+    let ask_user_waiting = agent == Agent::Pi && pi_ask_user::is_waiting_for_user(&screen);
+    if let Some(native_detection) = native_blocker(agent, &screen) {
+        detection = native_detection;
+    }
+    Some((detection, traces, screen, ask_user_waiting))
 }
 
 /// The engine input is the visible screen with trailing blank rows trimmed,
@@ -231,6 +253,22 @@ mod tests {
         assert_eq!(detection_screen("a\n\nb\n\n\n"), "a\n\nb");
         assert_eq!(detection_screen("\n\n"), "");
         assert_eq!(detection_screen("x"), "x");
+    }
+
+    #[test]
+    fn pi_ask_user_observation_overrides_manifest_detection() {
+        let screen = "Questions for you\n\n Enter submit • Tab/Shift+Tab navigate • Esc cancel\n────────────────────────────────────────────────────────────────\n";
+        let detection = detect_screen(Agent::Pi, screen, "");
+        assert_eq!(detection.state, EngineState::Blocked);
+        assert_eq!(detection.rule_id.as_deref(), Some(PI_ASK_USER_RULE_ID));
+        assert!(detection.visible);
+    }
+
+    #[test]
+    fn pi_ask_user_observation_does_not_apply_to_other_agents() {
+        let screen = "Questions for you\n\n Enter submit • Tab/Shift+Tab navigate • Esc cancel\n────────────────────────────────────────────────────────────────\n";
+        let detection = detect_screen(Agent::Claude, screen, "");
+        assert_ne!(detection.rule_id.as_deref(), Some(PI_ASK_USER_RULE_ID));
     }
 
     #[test]

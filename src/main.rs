@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod detect;
+mod pi_ask_user;
 mod platform;
 mod snapshot;
 mod state;

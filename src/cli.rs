@@ -115,7 +115,7 @@ pub fn run_explain(pane_id: &str) -> i32 {
         eprintln!("pane {pane_id}: capture failed");
         return 1;
     };
-    let Some((detection, traces, screen)) =
+    let Some((detection, traces, screen, ask_user_waiting)) =
         snapshot::explain_screen(agent, &raw_screen, &pane.pane_title)
     else {
         println!("agent has no manifest; state falls back to idle");
@@ -129,6 +129,21 @@ pub fn run_explain(pane_id: &str) -> i32 {
         detection.skip,
         detection.visible
     );
+    if agent == detect::Agent::Pi {
+        println!(
+            "native pi ask_user observer: {}{}",
+            if ask_user_waiting {
+                "MATCH"
+            } else {
+                "no match"
+            },
+            if ask_user_waiting {
+                " (takes precedence over Herdr)"
+            } else {
+                ""
+            }
+        );
+    }
     println!("\n--- screen input ({} lines) ---", screen.lines().count());
     for line in screen.lines() {
         println!("| {line}");

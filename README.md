@@ -48,25 +48,31 @@ TUI keys: `q`/`Esc` quit, `j`/`k` or arrows scroll, `g` top, PgUp/PgDn page.
 
 ## How it works
 
-Detection reuses [herdr](https://github.com/ogulcancelik/herdr)'s
-evidence-based approach (Apache-2.0, see NOTICE):
+Detection combines project-native observations with
+[herdr](https://github.com/ogulcancelik/herdr)'s evidence-based approach
+(Apache-2.0, see NOTICE):
 
 1. **Process identification** — from each pane's `#{pane_pid}`, the
    foreground process group of the pane's terminal is resolved via
    `proc_pidinfo`/`proc_listpids`, unwrapping runtime wrappers (`node`,
    `python`, shells) and nested-PTY wrapper shells to find the agent process.
-2. **Screen detection** — for agent panes, `capture-pane -p` (the visible
-   screen, immune to copy-mode scrolling) plus `#{pane_title}` (OSC title)
-   are matched against per-agent rule manifests vendored verbatim from herdr
-   (`src/detect/manifests/*.toml`) by a compatible rule engine
-   (regions, AND/OR/NOT gates, priority winner selection).
-3. **Debounce** — Working→Idle needs two consecutive confirming polls unless
+2. **Native blockers** — Pi panes are checked for the active custom UI from
+   the [`ask_user` extension](https://github.com/earendil-works/pi-agent-extensions/blob/master/src/ask-user.ts).
+   Its help line immediately above the component's bottom border means the
+   tool is waiting for an answer, so it takes precedence as **blocked**. This
+   observer lives in `src/pi_ask_user.rs`, outside the Herdr-derived detector.
+3. **Screen detection** — for agent panes without a native blocker,
+   `capture-pane -p` (the visible screen, immune to copy-mode scrolling) plus
+   `#{pane_title}` (OSC title) are matched against per-agent rule manifests
+   vendored verbatim from Herdr (`src/detect/manifests/*.toml`) by a compatible
+   rule engine (regions, AND/OR/NOT gates, priority winner selection).
+4. **Debounce** — Working→Idle needs two consecutive confirming polls unless
    the screen shows explicit idle chrome; new panes get one cycle of startup
    grace; agent-owned viewer screens (`skip_state_update`) keep the previous
    state. Transitions into/out of Blocked are never delayed.
 
-When a detection looks wrong, `--explain %N` prints the exact screen input
-and every rule's evaluation — fix or override the manifest from there.
+When a detection looks wrong, `--explain %N` prints the resolved native
+observer status, exact screen input, and every manifest rule's evaluation.
 
 ## Manual end-to-end checklist
 
